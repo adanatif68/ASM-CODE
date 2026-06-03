@@ -1,0 +1,578 @@
+TITLE Smart City Traffic Congestion Monitoring System (MASM + Irvine32)
+
+INCLUDE Irvine32.inc
+
+MAX_JUNCTIONS equ 20
+HISTORY_SIZE  equ 5
+
+Junction STRUCT
+    JunctionID      DWORD ?
+    VehicleCount    DWORD ?
+    CongestionLevel DWORD ?
+    SignalStatus    DWORD ?
+    EmergencyFlag   DWORD ?
+    WaitingTime     DWORD ?
+Junction ENDS
+
+.data
+    junctionArr     Junction MAX_JUNCTIONS DUP(<>)
+    junctionCount   DWORD 0
+    
+    historyBuffer   DWORD HISTORY_SIZE DUP(0)
+    historyIndex    DWORD 0
+
+    menuHeader      BYTE "===================================================", 0dh, 0ah
+                    BYTE "      SMART CITY TRAFFIC MONITORING SYSTEM         ", 0dh, 0ah
+                    BYTE "===================================================", 0dh, 0ah, 0
+                    
+    menuPrompt      BYTE "1. Add New Junction Record", 0dh, 0ah
+                    BYTE "2. Update Congestion Level Dynamically", 0dh, 0ah
+                    BYTE "3. Search Junction by ID", 0dh, 0ah
+                    BYTE "4. Prioritize Emergency Vehicle Routes", 0dh, 0ah
+                    BYTE "5. Display All Junctions (Sorted by Congestion)", 0dh, 0ah
+                    BYTE "6. View System Metrics & Debug History", 0dh, 0ah
+                    BYTE "7. Exit System", 0dh, 0ah
+                    BYTE "Enter your choice (1-7): ", 0
+                         
+    invalidChoice   BYTE "Invalid choice! Please select between 1 and 7.", 0dh, 0ah, 0
+    goodbyeMsg      BYTE "System shutting down safely. Goodbye!", 0dh, 0ah, 0
+    pressKeyMsg     BYTE "Press any key to return to menu...", 0
+    
+    pID             BYTE "Enter Junction ID (Numeric): ", 0
+    pVehicles       BYTE "Enter Vehicle Count: ", 0
+    pEmerg          BYTE "Is there an Emergency Vehicle active? (1 = Yes, 0 = No): ", 0
+    pWait           BYTE "Enter initial Waiting Time (seconds): ", 0
+    pSearchID       BYTE "Enter Junction ID to find: ", 0
+    pUpdateID       BYTE "Enter Junction ID to update: ", 0
+    
+    successAdd      BYTE "Junction successfully registered!", 0dh, 0ah, 0
+    notFoundMsg     BYTE "Junction ID not found in system.", 0dh, 0ah, 0
+    updateSuccess   BYTE "Congestion and waiting times successfully updated.", 0dh, 0ah, 0
+    emergSuccess    BYTE "Emergency protocols initiated. Stack simulation complete.", 0dh, 0ah, 0
+    
+    tblHeader       BYTE "ID       Vehicles   Congestion   Signal   Emergency   Waiting Time", 0dh, 0ah
+                    BYTE "------------------------------------------------------------------", 0
+                    
+    msgLow          BYTE "Low     ", 0
+    msgMed          BYTE "Medium  ", 0
+    msgHigh         BYTE "High    ", 0
+    msgRed          BYTE "Red  ", 0
+    msgGreen        BYTE "Green", 0
+    msgYes          BYTE "Active", 0
+    msgNo           BYTE "None  ", 0
+    spaces          BYTE "      ", 0
+    
+    lblMetrics      BYTE "--- SYSTEM METRICS & RECENT HISTORY ---", 0dh, 0ah, 0
+    lblAvgCong      BYTE "Average Congestion Level (1-3): ", 0
+    lblTotalEmerg   BYTE "Total Emergency Alerts Active: ", 0
+    lblHistory      BYTE "Last 5 modified Junction IDs (History Buffer): ", 0
+
+.code
+main PROC
+    call Clrscr
+
+menu_loop:
+    call Clrscr
+    mov edx, OFFSET menuHeader
+    call WriteString
+    mov edx, OFFSET menuPrompt
+    call WriteString
+    
+    call ReadInt
+    call Crlf
+    
+    cmp eax, 1
+    je  opt_add
+    cmp eax, 2
+    je  opt_update
+    cmp eax, 3
+    je  opt_search
+    cmp eax, 4
+    je  opt_prioritize
+    cmp eax, 5
+    je  opt_display
+    cmp eax, 6
+    je  opt_metrics
+    cmp eax, 7
+    je  opt_exit
+    
+    mov edx, OFFSET invalidChoice
+    call WriteString
+    jmp pause_menu
+
+opt_add:
+    call AddJunction
+    jmp pause_menu
+opt_update:
+    call UpdateCongestion
+    jmp pause_menu
+opt_search:
+    call SearchJunction
+    jmp pause_menu
+opt_prioritize:
+    call PrioritizeEmergency
+    jmp pause_menu
+opt_display:
+    call DisplaySortedJunctions
+    jmp pause_menu
+opt_metrics:
+    call ViewMetrics
+    jmp pause_menu
+opt_exit:
+    mov edx, OFFSET goodbyeMsg
+    call WriteString
+    exit
+
+pause_menu:
+    call Crlf
+    mov edx, OFFSET pressKeyMsg
+    call WriteString
+    call ReadChar
+    jmp menu_loop
+
+main ENDP
+
+AddJunction PROC
+    pushad
+    
+    mov eax, junctionCount
+    cmp eax, MAX_JUNCTIONS
+    jae buf_full
+    
+    mov ebx, TYPE Junction
+    mul ebx
+    lea esi, [junctionArr + eax]
+    
+    mov edx, OFFSET pID
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).JunctionID, eax
+    push eax
+    
+    mov edx, OFFSET pVehicles
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).VehicleCount, eax
+    
+    mov edx, OFFSET pEmerg
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).EmergencyFlag, eax
+    
+    mov edx, OFFSET pWait
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).WaitingTime, eax
+    
+    mov (Junction PTR [esi]).SignalStatus, 0
+    
+    mov eax, (Junction PTR [esi]).VehicleCount
+    call AnalyzeCongestionThreshold
+    mov (Junction PTR [esi]).CongestionLevel, eax
+    
+    inc junctionCount
+    
+    pop eax
+    call LogHistory
+    
+    mov edx, OFFSET successAdd
+    call WriteString
+    jmp short_exit
+
+buf_full:
+short_exit:
+    popad
+    ret
+AddJunction ENDP
+
+AnalyzeCongestionThreshold PROC
+    cmp eax, 10
+    jl  set_low
+    cmp eax, 30
+    jle set_med
+    
+    mov eax, 3
+    ret
+set_low:
+    mov eax, 1
+    ret
+set_med:
+    mov eax, 2
+    ret
+AnalyzeCongestionThreshold ENDP
+
+UpdateCongestion PROC
+    pushad
+    
+    mov edx, OFFSET pUpdateID
+    call WriteString
+    call ReadInt
+    
+    call FindJunctionOffset
+    cmp eax, -1
+    je  not_found
+    
+    lea esi, [junctionArr + eax]
+    
+    mov edx, OFFSET pVehicles
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).VehicleCount, eax
+    
+    mov edx, OFFSET pWait
+    call WriteString
+    call ReadInt
+    mov (Junction PTR [esi]).WaitingTime, eax
+    
+    mov eax, (Junction PTR [esi]).VehicleCount
+    call AnalyzeCongestionThreshold
+    mov (Junction PTR [esi]).CongestionLevel, eax
+    
+    mov eax, (Junction PTR [esi]).JunctionID
+    call LogHistory
+    
+    mov edx, OFFSET updateSuccess
+    call WriteString
+    jmp done
+    
+not_found:
+    mov edx, OFFSET notFoundMsg
+    call WriteString
+done:
+    popad
+    ret
+UpdateCongestion ENDP
+
+SearchJunction PROC
+    pushad
+    
+    mov edx, OFFSET pSearchID
+    call WriteString
+    call ReadInt
+    
+    call FindJunctionOffset
+    cmp eax, -1
+    je  no_find
+    
+    lea esi, [junctionArr + eax]
+    call Crlf
+    mov edx, OFFSET tblHeader
+    call WriteString
+    call PrintJunctionRow
+    jmp exit_search
+    
+no_find:
+    mov edx, OFFSET notFoundMsg
+    call WriteString
+    
+exit_search:
+    popad
+    ret
+SearchJunction ENDP
+
+PrioritizeEmergency PROC
+    pushad
+    
+    mov ecx, junctionCount
+    xor eax, eax
+    lea esi, junctionArr
+    
+    cmp ecx, 0
+    je  exit_prio
+
+prio_loop:
+    cmp (Junction PTR [esi]).EmergencyFlag, 1
+    jne next_prio
+    
+    push (Junction PTR [esi]).JunctionID
+    call OptimizeRouteSequence
+    
+    mov (Junction PTR [esi]).SignalStatus, 1
+    mov (Junction PTR [esi]).WaitingTime, 0
+    
+    mov eax, (Junction PTR [esi]).JunctionID
+    call LogHistory
+    
+next_prio:
+    add esi, TYPE Junction
+    loop prio_loop
+    
+    mov edx, OFFSET emergSuccess
+    call WriteString
+
+exit_prio:
+    popad
+    ret
+PrioritizeEmergency ENDP
+
+OptimizeRouteSequence PROC
+    push ebp
+    mov ebp, esp
+    
+    mov eax, [ebp + 8] 
+    
+    pop ebp
+    ret 4
+OptimizeRouteSequence ENDP
+
+DisplaySortedJunctions PROC
+    pushad
+    
+    mov ecx, junctionCount
+    cmp ecx, 0
+    je  empty_arr
+    cmp ecx, 1
+    je  print_only
+    
+    dec ecx
+outer_loop:
+    push ecx
+    lea esi, junctionArr
+    
+inner_loop:
+    mov eax, (Junction PTR [esi]).CongestionLevel
+    mov ebx, (Junction PTR [esi + TYPE Junction]).CongestionLevel
+    cmp eax, ebx
+    jae no_swap
+    
+    push ecx
+    mov ecx, TYPE Junction
+    lea edi, [esi + TYPE Junction]
+swap_byte:
+    mov al, [esi]
+    mov bl, [edi]
+    mov [esi], bl
+    mov [edi], al
+    inc esi
+    inc edi
+    loop swap_byte
+    
+    pop ecx
+    sub esi, TYPE Junction
+    
+no_swap:
+    add esi, TYPE Junction
+    loop inner_loop
+    
+    pop ecx
+    loop outer_loop
+
+print_only:
+    mov edx, OFFSET tblHeader
+    call WriteString
+    
+    mov ecx, junctionCount
+    lea esi, junctionArr
+display_loop:
+    call PrintJunctionRow
+    add esi, TYPE Junction
+    loop display_loop
+    jmp exit_disp
+
+empty_arr:
+    mov edx, OFFSET tblHeader
+    call WriteString
+    
+exit_disp:
+    popad
+    ret
+DisplaySortedJunctions ENDP
+
+ViewMetrics PROC
+    pushad
+    
+    mov edx, OFFSET lblMetrics
+    call WriteString
+    call Crlf
+    
+    mov edx, OFFSET lblAvgCong
+    call WriteString
+    
+    mov ecx, junctionCount
+    cmp ecx, 0
+    je  zero_metrics
+    
+    xor edx, edx
+    xor eax, eax
+    lea esi, junctionArr
+calc_avg:
+    add eax, (Junction PTR [esi]).CongestionLevel
+    add esi, TYPE Junction
+    loop calc_avg
+    
+    xor edx, edx
+    div junctionCount
+    call WriteDec
+    call Crlf
+    jmp calc_emerg
+    
+zero_metrics:
+    mov eax, 0
+    call WriteDec
+    call Crlf
+
+calc_emerg:
+    mov edx, OFFSET lblTotalEmerg
+    call WriteString
+    
+    mov ecx, junctionCount
+    xor ebx, ebx
+    lea esi, junctionArr
+    cmp ecx, 0
+    je  print_emerg
+    
+count_em:
+    cmp (Junction PTR [esi]).EmergencyFlag, 1
+    jne skip_em
+    inc ebx
+skip_em:
+    add esi, TYPE Junction
+    loop count_em
+
+print_emerg:
+    mov eax, ebx
+    call WriteDec
+    call Crlf
+    call Crlf
+    
+    mov edx, OFFSET lblHistory
+    call WriteString
+    
+    mov ecx, HISTORY_SIZE
+    mov esi, 0
+print_hist:
+    mov eax, historyBuffer[esi * 4]
+    call WriteDec
+    mov edx, OFFSET spaces
+    call WriteString
+    inc esi
+    loop print_hist
+    call Crlf
+
+    popad
+    ret
+ViewMetrics ENDP
+
+FindJunctionOffset PROC
+    push ecx
+    push edx
+    push esi
+    
+    mov edx, eax
+    mov ecx, junctionCount
+    xor ebx, ebx
+    lea esi, junctionArr
+    
+search_loop:
+    cmp ecx, 0
+    je  not_found_idx
+    
+    mov eax, (Junction PTR [esi]).JunctionID
+    cmp eax, edx
+    je  found_idx
+    
+    add esi, TYPE Junction
+    add ebx, TYPE Junction
+    loop search_loop
+
+not_found_idx:
+    mov eax, -1
+    jmp exit_search_idx
+
+found_idx:
+    mov eax, ebx
+
+exit_search_idx:
+    pop esi
+    pop edx
+    pop ecx
+    ret
+FindJunctionOffset ENDP
+
+PrintJunctionRow PROC
+    pushad
+    
+    mov eax, (Junction PTR [esi]).JunctionID
+    call WriteDec
+    mov edx, OFFSET spaces
+    call WriteString
+    
+    mov eax, (Junction PTR [esi]).VehicleCount
+    call WriteDec
+    mov edx, OFFSET spaces
+    call WriteString
+    
+    mov eax, (Junction PTR [esi]).CongestionLevel
+    cmp eax, 1
+    je  pr_low
+    cmp eax, 2
+    je  pr_med
+    
+    mov edx, OFFSET msgHigh
+    call WriteString
+    jmp print_signal
+pr_low:
+    mov edx, OFFSET msgLow
+    call WriteString
+    jmp print_signal
+pr_med:
+    mov edx, OFFSET msgMed
+    call WriteString
+
+print_signal:
+    mov eax, (Junction PTR [esi]).SignalStatus
+    cmp eax, 1
+    je  pr_green
+    mov edx, OFFSET msgRed
+    call WriteString
+    jmp print_emerg_flag
+pr_green:
+    mov edx, OFFSET msgGreen
+    call WriteString
+
+print_emerg_flag:
+    mov edx, OFFSET spaces
+    call WriteString
+    
+    mov eax, (Junction PTR [esi]).EmergencyFlag
+    cmp eax, 1
+    je  pr_yes
+    mov edx, OFFSET msgNo
+    call WriteString
+    jmp print_wait
+pr_yes:
+    mov edx, OFFSET msgYes
+    call WriteString
+
+print_wait:
+    mov edx, OFFSET spaces
+    call WriteString
+    
+    mov eax, (Junction PTR [esi]).WaitingTime
+    call WriteDec
+    call Crlf
+    
+    popad
+    ret
+PrintJunctionRow ENDP
+
+LogHistory PROC
+    push ebx
+    push edx
+    
+    mov ebx, historyIndex
+    mov historyBuffer[ebx * 4], eax
+    
+    inc ebx
+    cmp ebx, HISTORY_SIZE
+    jne save_idx
+    xor ebx, ebx
+    
+save_idx:
+    mov historyIndex, ebx
+    pop edx
+    pop ebx
+    ret
+LogHistory ENDP
+
+END main
